@@ -2,8 +2,10 @@
 FROM golang:1.16-alpine as builder
 WORKDIR /app
 ADD . /app
+
 RUN apk add --update-cache gcc musl-dev
-RUN go build -tags "nolimit" ./cmd/drone-server/
+#RUN go build -tags "nolimit" ./cmd/drone-server/
+RUN go build -tags "oss nolimit" ./cmd/drone-server
 
 FROM alpine:3.11 as alpine
 RUN apk add -U --no-cache ca-certificates tzdata
