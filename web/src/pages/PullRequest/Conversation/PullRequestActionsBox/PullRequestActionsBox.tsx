@@ -209,7 +209,11 @@ export const PullRequestActionsBox: React.FC<PullRequestActionsBoxProps> = ({
     if (allowedStrats) {
       const matchingMethods = mergeOptions.filter(option => allowedStrats.includes(option.method))
       if (matchingMethods.length > 0) {
-        setMergeOption(mergeOption ? mergeOption : matchingMethods[0])
+        if (mergeOption && !matchingMethods.includes(mergeOption)) {
+          setMergeOption(matchingMethods[0])
+        } else {
+          setMergeOption(mergeOption)
+        }
       }
     } else {
       setMergeOption(mergeOptions[3])
@@ -243,7 +247,7 @@ export const PullRequestActionsBox: React.FC<PullRequestActionsBoxProps> = ({
       commitTitle: messageTitle,
       commitMessage: mergeOption.method === MergeStrategy.SQUASH ? messageString : ''
     }
-  }, [pullReqCommits, mergeOption])
+  }, [pullReqCommits, mergeOption, pullReqMetadata])
 
   if (pullReqMetadata.state === PullRequestFilterOption.MERGED) {
     return <MergeInfo pullRequestMetadata={pullReqMetadata} />

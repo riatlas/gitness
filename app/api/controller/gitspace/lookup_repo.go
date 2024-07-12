@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package infraprovider
+package gitspace
 
 import (
 	"context"
@@ -20,23 +20,33 @@ import (
 
 	apiauth "github.com/harness/gitness/app/api/auth"
 	"github.com/harness/gitness/app/auth"
-	"github.com/harness/gitness/types"
+	"github.com/harness/gitness/app/gitspace/scm"
 	"github.com/harness/gitness/types/enum"
 )
 
-func (c *Controller) Find(
+type LookupRepoInput struct {
+	Identifier string `json:"-"`
+	SpaceRef   string `json:"space_ref"` // Ref of the parent space
+	URL        string `json:"url"`
+}
+
+func (c *Controller) LookupRepo(
 	ctx context.Context,
 	session *auth.Session,
-	spaceRef string,
-	identifier string,
-) (*types.InfraProviderConfig, error) {
-	space, err := c.spaceStore.FindByRef(ctx, spaceRef)
+	in *LookupRepoInput,
+) (*scm.CodeRepositoryResponse, error) {
+	space, err := c.spaceStore.FindByRef(ctx, in.SpaceRef)
 	if err != nil {
 		return nil, fmt.Errorf("failed to find space: %w", err)
 	}
-	err = apiauth.CheckGitspace(ctx, c.authorizer, session, space.Path, identifier, enum.PermissionInfraProviderView)
+	err = apiauth.CheckGitspace(ctx, c.authorizer, session, space.Path, "", enum.PermissionGitspaceEdit)
 	if err != nil {
 		return nil, fmt.Errorf("failed to authorize: %w", err)
 	}
-	return c.infraproviderSvc.Find(ctx, space, identifier)
+	repositoryRequest := scm.CodeRepositoryRequest{URL: in.URL}
+	codeRepositoryResponse, err := c.scm.CheckValidCodeRepo(ctx, repositoryRequest)
+	if err != nil {
+		return nil, err
+	}
+	return codeRepositoryResponse, nil
 }

@@ -12,28 +12,14 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package infraprovider
+package scm
 
-import (
-	"github.com/harness/gitness/app/auth/authz"
-	"github.com/harness/gitness/app/services/infraprovider"
-	"github.com/harness/gitness/app/store"
-)
-
-type Controller struct {
-	authorizer       authz.Authorizer
-	spaceStore       store.SpaceStore
-	infraproviderSvc infraprovider.ProviderService
+type CodeRepositoryRequest struct {
+	URL string `json:"url"`
 }
 
-func NewController(
-	authorizer authz.Authorizer,
-	spaceStore store.SpaceStore,
-	infraproviderSvc infraprovider.ProviderService,
-) *Controller {
-	return &Controller{
-		authorizer:       authorizer,
-		spaceStore:       spaceStore,
-		infraproviderSvc: infraproviderSvc,
-	}
+type CodeRepositoryResponse struct {
+	URL               string `json:"url"`
+	Branch            string `json:"branch,omitempty"`
+	CodeRepoIsPrivate bool   `json:"is_private"`
 }
