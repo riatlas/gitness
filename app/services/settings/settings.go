@@ -21,5 +21,5 @@ var (
 	KeySecretScanningEnabled     Key = "secret_scanning_enabled"
 	DefaultSecretScanningEnabled     = false
 	KeyFileSizeLimit             Key = "file_size_limit"
-	DefaultFileSizeLimit             = int64(1e+8) // 100 MB
+	DefaultFileSizeLimit             = int64(1e+9 * 5) // 5 GB
 )
