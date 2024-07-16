@@ -385,6 +385,9 @@ type Config struct {
 		CertPath string `envconfig:"GITNESS_DOCKER_CERT_PATH"`
 		// TLSVerify enables or disables TLS verification, off by default.
 		TLSVerify string `envconfig:"GITNESS_DOCKER_TLS_VERIFY"`
+		// MachineHostName is the public host name of the machine on which the Docker.Host is running.
+		// If not set, it parses the host from the URL.Base (e.g. localhost from http://localhost:3000).
+		MachineHostName string `envconfig:"GITNESS_DOCKER_MACHINE_HOST_NAME"`
 	}
 
 	IDE struct {
@@ -399,10 +402,16 @@ type Config struct {
 		DefaultBaseImage string `envconfig:"GITNESS_GITSPACE_DEFAULT_BASE_IMAGE" default:"mcr.microsoft.com/devcontainers/base:dev-ubuntu-24.04"` //nolint:lll
 		// DefaultBindMountTargetPath is the target for bind mount in the Gitspace container.
 		DefaultBindMountTargetPath string `envconfig:"GITNESS_GITSPACE_DEFAULT_BIND_MOUNT_TARGET_PATH" default:"/gitspace"` //nolint:lll
+
+		Enable bool `envconfig:"GITNESS_GITSPACE_ENABLE" default:"false"`
+
 		// DefaultBindMountTargetPath is the source for bind mount in the Gitspace container.
 		// Sub-directories will be created from this eg <DefaultBindMountSourceBasePath>/gitspace/space1/space2/config1
 		// If left blank, it will be set to $HOME/.gitness
 		DefaultBindMountSourceBasePath string `envconfig:"GITNESS_GITSPACE_DEFAULT_BIND_MOUNT_SOURCE_BASE_PATH"`
+		// DefaultBindMountSourceBasePathAbsolute is the source path on which the DefaultBindMountSourceBasePath
+		// is mounted in Gitness container. If left blank, it will be equal to DefaultBindMountSourceBasePath.
+		DefaultBindMountSourceBasePathAbsolute string `envconfig:"GITNESS_GITSPACE_DEFAULT_BIND_MOUNT_SOURCE_BASE_PATH_ABSOLUTE"` //nolint:lll
 
 		Events struct {
 			Concurrency int `envconfig:"GITNESS_GITSPACE_EVENTS_CONCURRENCY" default:"4"`

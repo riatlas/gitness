@@ -19,6 +19,7 @@ import { Container, Layout } from '@harnessio/uicore'
 import { Render } from 'react-jsx-match'
 import { useHistory, useRouteMatch } from 'react-router-dom'
 import { FingerprintLockCircle, BookmarkBook, UserSquare, Settings } from 'iconoir-react'
+import { useGet } from 'restful-react'
 import { useGetRepositoryMetadata } from 'hooks/useGetRepositoryMetadata'
 import { useStrings } from 'framework/strings'
 import type { SpaceSpaceOutput } from 'services/code'
@@ -37,6 +38,8 @@ export const DefaultMenu: React.FC = () => {
   const repoPath = useMemo(() => repoMetadata?.path || '', [repoMetadata])
   const routeMatch = useRouteMatch()
   const isCommitSelected = useMemo(() => routeMatch.path === '/:space*/:repoName/commit/:commitRef*', [routeMatch])
+
+  const { data: systemConfig } = useGet({ path: 'api/v1/system/config' })
 
   const isFilesSelected = useMemo(
     () =>
@@ -171,6 +174,17 @@ export const DefaultMenu: React.FC = () => {
             </Layout.Vertical>
           </Container>
         </Render>
+
+        {systemConfig?.gitspace_enabled && (
+          <Render when={selectedSpace}>
+            <NavMenuItem
+              className=""
+              label={getString('cde.gitspaces')}
+              to={routes.toCDEGitspaces({ space: selectedSpace?.path as string })}
+              icon="gitspace"
+            />
+          </Render>
+        )}
 
         <Render when={!standalone && selectedSpace}>
           <NavMenuItem
