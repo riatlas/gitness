@@ -16,7 +16,6 @@ package reposettings
 
 import (
 	"github.com/harness/gitness/app/services/settings"
-
 	"github.com/gotidy/ptr"
 )
 
