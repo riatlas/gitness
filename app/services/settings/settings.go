@@ -14,6 +14,11 @@
 
 package settings
 
+import (
+	"os"
+	"strconv"
+)
+
 type Key string
 
 var (
@@ -21,5 +26,12 @@ var (
 	KeySecretScanningEnabled     Key = "secret_scanning_enabled"
 	DefaultSecretScanningEnabled     = false
 	KeyFileSizeLimit             Key = "file_size_limit"
-	DefaultFileSizeLimit             = int64(1e+9 * 5) // 5 GB
+	DefaultFileSizeLimit = func() int64 {
+		env := os.Getenv("DEFAULT_FILE_SIZE_LIMIT")
+		if env != "" {
+			res, _ := strconv.ParseInt(env, 10, 64)
+			return res
+		}
+		return int64(1e+9 * 5)
+	}()
 )
