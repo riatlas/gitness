@@ -27,11 +27,11 @@ var WireSet = wire.NewSet(
 )
 
 func ProvideInfraProvider(
+	tx dbtx.Transactor,
 	infraProviderResourceStore store.InfraProviderResourceStore,
 	infraProviderConfigStore store.InfraProviderConfigStore,
 	infraProviderFactory infraprovider.Factory,
 	spaceStore store.SpaceStore,
-	tx dbtx.Transactor,
-) ProviderService {
+) *Service {
 	return NewService(tx, infraProviderResourceStore, infraProviderConfigStore, infraProviderFactory, spaceStore)
 }

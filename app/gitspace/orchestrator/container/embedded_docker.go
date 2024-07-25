@@ -18,9 +18,6 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"os"
-	"path/filepath"
-	"strings"
 
 	"github.com/harness/gitness/app/gitspace/logutil"
 	"github.com/harness/gitness/infraprovider"
@@ -31,7 +28,6 @@ import (
 	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/filters"
 	"github.com/docker/docker/api/types/mount"
-	"github.com/docker/docker/api/types/strslice"
 	"github.com/docker/docker/client"
 	"github.com/docker/go-connections/nat"
 	"github.com/rs/zerolog/log"
@@ -45,16 +41,13 @@ const (
 	catchAllPort           = "0"
 	containerStateRunning  = "running"
 	containerStateRemoved  = "removed"
+	containerStateStopped  = "exited"
 	templateCloneGit       = "clone_git.sh"
 	templateSetupSSHServer = "setup_ssh_server.sh"
-	gitspacesDir           = "gitspaces"
 )
 
 type Config struct {
-	DefaultBaseImage                       string
-	DefaultBindMountTargetPath             string
-	DefaultBindMountSourceBasePath         string
-	DefaultBindMountSourceBasePathAbsolute string
+	DefaultBaseImage string
 }
 
 type EmbeddedDockerOrchestrator struct {
@@ -81,16 +74,16 @@ func NewEmbeddedDockerOrchestrator(
 	}
 }
 
-// StartGitspace checks if the Gitspace is already running by checking its entry in a map. If is it running,
-// it returns, else, it creates a new Gitspace container by using the provided image. If the provided image is
-// nil, it uses a default image read from Gitness config. Post creation it runs the postCreate command and clones
-// the code inside the container. It uses the IDE service to setup the relevant IDE and install the SSH server
-// inside the container.
-func (e *EmbeddedDockerOrchestrator) StartGitspace(
+// CreateAndStartGitspace starts an exited container and starts a new container if the container is removed.
+// If the container is newly created, it clones the code, sets up the IDE and executes the postCreateCommand.
+// It returns the container ID, name and ports used.
+// It returns an error if the container is not running, exited or removed.
+func (e *EmbeddedDockerOrchestrator) CreateAndStartGitspace(
 	ctx context.Context,
 	gitspaceConfig *types.GitspaceConfig,
 	devcontainerConfig *types.DevcontainerConfig,
 	infra *infraprovider.Infrastructure,
+	repoName string,
 ) (*StartResponse, error) {
 	containerName := getGitspaceContainerName(gitspaceConfig)
 
@@ -114,32 +107,17 @@ func (e *EmbeddedDockerOrchestrator) StartGitspace(
 		return nil, err
 	}
 
-	var usedPorts map[enum.IDEType]string
-	var containerID string
+	ideService, err := e.getIDEService(gitspaceConfig)
+	if err != nil {
+		return nil, err
+	}
+
 	switch state {
 	case containerStateRunning:
 		log.Debug().Msg("gitspace is already running")
 
-		ideService, startErr := e.getIDEService(gitspaceConfig)
-		if startErr != nil {
-			return nil, startErr
-		}
-
-		id, ports, startErr := e.getContainerInfo(ctx, containerName, dockerClient, ideService)
-		if startErr != nil {
-			return nil, startErr
-		}
-
-		usedPorts = ports
-		containerID = id
-
-	case containerStateRemoved:
-		log.Debug().Msg("gitspace is not running, starting it...")
-
-		ideService, startErr := e.getIDEService(gitspaceConfig)
-		if startErr != nil {
-			return nil, startErr
-		}
+	case containerStateStopped:
+		log.Debug().Msg("gitspace is stopped, starting it")
 
 		logStreamInstance, loggerErr := e.statefulLogger.CreateLogStream(ctx, gitspaceConfig.ID)
 		if loggerErr != nil {
@@ -153,7 +131,41 @@ func (e *EmbeddedDockerOrchestrator) StartGitspace(
 			}
 		}()
 
-		startErr = e.startGitspace(
+		startErr := e.startContainer(ctx, dockerClient, containerName, logStreamInstance)
+		if startErr != nil {
+			return nil, startErr
+		}
+
+		devcontainer := &Devcontainer{
+			ContainerName: containerName,
+			WorkingDir:    e.getWorkingDir(repoName),
+			DockerClient:  dockerClient,
+		}
+
+		err = e.runIDE(ctx, devcontainer, ideService, logStreamInstance)
+		if err != nil {
+			return nil, err
+		}
+
+		// TODO: Add gitspace status reporting.
+		log.Debug().Msg("started gitspace")
+
+	case containerStateRemoved:
+		log.Debug().Msg("gitspace is removed, creating it...")
+
+		logStreamInstance, loggerErr := e.statefulLogger.CreateLogStream(ctx, gitspaceConfig.ID)
+		if loggerErr != nil {
+			return nil, fmt.Errorf("error getting log stream for gitspace ID %d: %w", gitspaceConfig.ID, loggerErr)
+		}
+
+		defer func() {
+			loggerErr = logStreamInstance.Flush()
+			if loggerErr != nil {
+				log.Warn().Err(loggerErr).Msgf("failed to flush log stream for gitspace ID %d", gitspaceConfig.ID)
+			}
+		}()
+
+		startErr := e.startGitspace(
 			ctx,
 			gitspaceConfig,
 			devcontainerConfig,
@@ -161,31 +173,34 @@ func (e *EmbeddedDockerOrchestrator) StartGitspace(
 			dockerClient,
 			ideService,
 			logStreamInstance,
+			infra.Storage,
+			e.getWorkingDir(repoName),
 		)
 		if startErr != nil {
 			return nil, fmt.Errorf("failed to start gitspace %s: %w", containerName, startErr)
 		}
-		id, ports, startErr := e.getContainerInfo(ctx, containerName, dockerClient, ideService)
-		if startErr != nil {
-			return nil, startErr
-		}
-
-		containerID = id
-		usedPorts = ports
 
 		// TODO: Add gitspace status reporting.
-		log.Debug().Msgf("started gitspace: %s", gitspaceConfig.Identifier)
+		log.Debug().Msg("started gitspace")
 
 	default:
 		return nil, fmt.Errorf("gitspace %s is in a bad state: %s", containerName, state)
 	}
 
+	id, ports, startErr := e.getContainerInfo(ctx, containerName, dockerClient, ideService)
+	if startErr != nil {
+		return nil, startErr
+	}
+
 	return &StartResponse{
-		ContainerID:      containerID,
-		ContainerName:    containerName,
-		WorkingDirectory: strings.TrimPrefix(e.config.DefaultBindMountTargetPath, "/"),
-		PortsUsed:        usedPorts,
+		ContainerID:   id,
+		ContainerName: containerName,
+		PortsUsed:     ports,
 	}, nil
+}
+
+func (e *EmbeddedDockerOrchestrator) getWorkingDir(repoName string) string {
+	return "/" + repoName
 }
 
 func (e *EmbeddedDockerOrchestrator) startGitspace(
@@ -196,6 +211,8 @@ func (e *EmbeddedDockerOrchestrator) startGitspace(
 	dockerClient *client.Client,
 	ideService IDE,
 	logStreamInstance *logutil.LogStreamInstance,
+	volumeName string,
+	workingDirectory string,
 ) error {
 	var imageName = devcontainerConfig.Image
 	if imageName == "" {
@@ -207,7 +224,21 @@ func (e *EmbeddedDockerOrchestrator) startGitspace(
 		return err
 	}
 
-	err = e.createContainer(ctx, gitspaceConfig, dockerClient, imageName, containerName, ideService, logStreamInstance)
+	err = e.createContainer(
+		ctx,
+		dockerClient,
+		imageName,
+		containerName,
+		ideService,
+		logStreamInstance,
+		volumeName,
+		workingDirectory,
+	)
+	if err != nil {
+		return err
+	}
+
+	err = e.startContainer(ctx, dockerClient, containerName, logStreamInstance)
 	if err != nil {
 		return err
 	}
@@ -215,7 +246,22 @@ func (e *EmbeddedDockerOrchestrator) startGitspace(
 	var devcontainer = &Devcontainer{
 		ContainerName: containerName,
 		DockerClient:  dockerClient,
-		WorkingDir:    e.config.DefaultBindMountTargetPath,
+		WorkingDir:    workingDirectory,
+	}
+
+	err = e.setupIDE(ctx, gitspaceConfig.GitspaceInstance, devcontainer, ideService, logStreamInstance)
+	if err != nil {
+		return err
+	}
+
+	err = e.runIDE(ctx, devcontainer, ideService, logStreamInstance)
+	if err != nil {
+		return err
+	}
+
+	err = e.cloneCode(ctx, gitspaceConfig, devcontainer, logStreamInstance)
+	if err != nil {
+		return err
 	}
 
 	err = e.executePostCreateCommand(ctx, devcontainerConfig, devcontainer, logStreamInstance)
@@ -223,14 +269,43 @@ func (e *EmbeddedDockerOrchestrator) startGitspace(
 		return err
 	}
 
-	err = e.cloneCode(ctx, gitspaceConfig, devcontainerConfig, devcontainer, logStreamInstance)
+	return nil
+}
+
+// TODO: Instead of explicitly running IDE related processes, we can explore service to run the service on boot.
+
+func (e *EmbeddedDockerOrchestrator) runIDE(
+	ctx context.Context,
+	devcontainer *Devcontainer,
+	ideService IDE,
+	logStreamInstance *logutil.LogStreamInstance,
+) error {
+	loggingErr := logStreamInstance.Write("Running the IDE inside container: " + string(ideService.Type()))
+	if loggingErr != nil {
+		return fmt.Errorf("logging error: %w", loggingErr)
+	}
+
+	output, err := ideService.Run(ctx, devcontainer)
 	if err != nil {
+		loggingErr = logStreamInstance.Write("Error while running IDE inside container: " + err.Error())
+
+		err = fmt.Errorf("failed to run the IDE for gitspace %s: %w", devcontainer.ContainerName, err)
+
+		if loggingErr != nil {
+			err = fmt.Errorf("original error: %w; logging error: %w", err, loggingErr)
+		}
+
 		return err
 	}
 
-	err = e.setupIDE(ctx, gitspaceConfig.GitspaceInstance, devcontainer, ideService, logStreamInstance)
-	if err != nil {
-		return err
+	loggingErr = logStreamInstance.Write("IDE run output...\n" + string(output))
+	if loggingErr != nil {
+		return fmt.Errorf("logging error: %w", loggingErr)
+	}
+
+	loggingErr = logStreamInstance.Write("Successfully run the IDE inside container")
+	if loggingErr != nil {
+		return fmt.Errorf("logging error: %w", loggingErr)
 	}
 
 	return nil
@@ -313,21 +388,14 @@ func (e *EmbeddedDockerOrchestrator) getIDEService(gitspaceConfig *types.Gitspac
 func (e *EmbeddedDockerOrchestrator) cloneCode(
 	ctx context.Context,
 	gitspaceConfig *types.GitspaceConfig,
-	devcontainerConfig *types.DevcontainerConfig,
 	devcontainer *Devcontainer,
 	logStreamInstance *logutil.LogStreamInstance,
 ) error {
-	var devcontainerPresent = "true"
-	if devcontainerConfig.Image == "" {
-		devcontainerPresent = "false"
-	}
-
 	gitCloneScript, err := GenerateScriptFromTemplate(
 		templateCloneGit, &CloneGitPayload{
-			RepoURL:             gitspaceConfig.CodeRepoURL,
-			DevcontainerPresent: devcontainerPresent,
-			Image:               e.config.DefaultBaseImage,
-			Branch:              gitspaceConfig.Branch,
+			RepoURL: gitspaceConfig.CodeRepoURL,
+			Image:   e.config.DefaultBaseImage,
+			Branch:  gitspaceConfig.Branch,
 		})
 	if err != nil {
 		return fmt.Errorf("failed to generate scipt to clone git from template %s: %w", templateCloneGit, err)
@@ -411,14 +479,47 @@ func (e *EmbeddedDockerOrchestrator) executePostCreateCommand(
 	return nil
 }
 
+func (e *EmbeddedDockerOrchestrator) startContainer(
+	ctx context.Context,
+	dockerClient *client.Client,
+	containerName string,
+	logStreamInstance *logutil.LogStreamInstance,
+) error {
+	loggingErr := logStreamInstance.Write("Starting container: " + containerName)
+	if loggingErr != nil {
+		return fmt.Errorf("logging error: %w", loggingErr)
+	}
+
+	err := dockerClient.ContainerStart(ctx, containerName, dockerTypes.ContainerStartOptions{})
+	if err != nil {
+		loggingErr = logStreamInstance.Write("Error while creating container: " + err.Error())
+
+		err = fmt.Errorf("could not start container %s: %w", containerName, err)
+
+		if loggingErr != nil {
+			err = fmt.Errorf("original error: %w; logging error: %w", err, loggingErr)
+		}
+
+		return err
+	}
+
+	loggingErr = logStreamInstance.Write("Successfully started container")
+	if loggingErr != nil {
+		return fmt.Errorf("logging error: %w", loggingErr)
+	}
+
+	return nil
+}
+
 func (e *EmbeddedDockerOrchestrator) createContainer(
 	ctx context.Context,
-	gitspaceConfig *types.GitspaceConfig,
 	dockerClient *client.Client,
 	imageName string,
 	containerName string,
 	ideService IDE,
 	logStreamInstance *logutil.LogStreamInstance,
+	volumeName string,
+	workingDirectory string,
 ) error {
 	portUsedByIDE := ideService.PortAndProtocol()
 
@@ -438,70 +539,23 @@ func (e *EmbeddedDockerOrchestrator) createContainer(
 		portBindings[natPort] = hostPortBindings
 	}
 
-	entryPoint := make(strslice.StrSlice, 0)
-	entryPoint = append(entryPoint, "sleep")
-
-	commands := make(strslice.StrSlice, 0)
-	commands = append(commands, "infinity")
-
-	bindMountSourcePath :=
-		filepath.Join(
-			e.config.DefaultBindMountSourceBasePath,
-			gitspacesDir,
-			gitspaceConfig.SpacePath,
-			gitspaceConfig.Identifier,
-		)
-
-	absoluteBindMountSourcePath :=
-		filepath.Join(
-			e.config.DefaultBindMountSourceBasePathAbsolute,
-			gitspacesDir,
-			gitspaceConfig.SpacePath,
-			gitspaceConfig.Identifier,
-		)
-
-	loggingErr := logStreamInstance.Write(
-		"Creating bind mount source directory: " + bindMountSourcePath + " (" + absoluteBindMountSourcePath + ")")
+	loggingErr := logStreamInstance.Write("Creating container: " + containerName)
 	if loggingErr != nil {
 		return fmt.Errorf("logging error: %w", loggingErr)
 	}
 
-	err := os.MkdirAll(bindMountSourcePath, os.ModePerm)
-	if err != nil {
-		loggingErr = logStreamInstance.Write("Error while creating bind mount source directory: " + err.Error())
-
-		err = fmt.Errorf(
-			"could not create bind mount source path %s: %w", bindMountSourcePath, err)
-
-		if loggingErr != nil {
-			err = fmt.Errorf("original error: %w; logging error: %w", err, loggingErr)
-		}
-
-		return err
-	}
-
-	loggingErr = logStreamInstance.Write("Successfully created bind mount source directory")
-	if loggingErr != nil {
-		return fmt.Errorf("logging error: %w", loggingErr)
-	}
-
-	loggingErr = logStreamInstance.Write("Creating container: " + containerName)
-	if loggingErr != nil {
-		return fmt.Errorf("logging error: %w", loggingErr)
-	}
-
-	resp2, err := dockerClient.ContainerCreate(ctx, &container.Config{
+	_, err := dockerClient.ContainerCreate(ctx, &container.Config{
 		Image:        imageName,
-		Entrypoint:   entryPoint,
-		Cmd:          commands,
+		Entrypoint:   []string{"/bin/sh"},
+		Cmd:          []string{"-c", "trap 'exit 0' 15; sleep infinity & wait $!"},
 		ExposedPorts: exposedPorts,
 	}, &container.HostConfig{
 		PortBindings: portBindings,
 		Mounts: []mount.Mount{
 			{
-				Type:   mount.TypeBind,
-				Source: absoluteBindMountSourcePath,
-				Target: e.config.DefaultBindMountTargetPath,
+				Type:   mount.TypeVolume,
+				Source: volumeName,
+				Target: workingDirectory,
 			},
 		},
 	}, nil, containerName)
@@ -515,34 +569,6 @@ func (e *EmbeddedDockerOrchestrator) createContainer(
 		}
 
 		return err
-	}
-
-	loggingErr = logStreamInstance.Write("Successfully created container")
-	if loggingErr != nil {
-		return fmt.Errorf("logging error: %w", loggingErr)
-	}
-
-	loggingErr = logStreamInstance.Write("Starting container: " + containerName)
-	if loggingErr != nil {
-		return fmt.Errorf("logging error: %w", loggingErr)
-	}
-
-	err = dockerClient.ContainerStart(ctx, resp2.ID, dockerTypes.ContainerStartOptions{})
-	if err != nil {
-		loggingErr = logStreamInstance.Write("Error while creating container: " + err.Error())
-
-		err = fmt.Errorf("could not start container %s: %w", containerName, err)
-
-		if loggingErr != nil {
-			err = fmt.Errorf("original error: %w; logging error: %w", err, loggingErr)
-		}
-
-		return err
-	}
-
-	loggingErr = logStreamInstance.Write("Successfully started container")
-	if loggingErr != nil {
-		return fmt.Errorf("logging error: %w", loggingErr)
 	}
 
 	return nil
@@ -608,8 +634,7 @@ func (e *EmbeddedDockerOrchestrator) pullImage(
 	return nil
 }
 
-// StopGitspace checks if the Gitspace container is running. If yes, it stops and removes the container.
-// Else it returns.
+// StopGitspace stops a container. If it is removed, it returns an error.
 func (e EmbeddedDockerOrchestrator) StopGitspace(
 	ctx context.Context,
 	gitspaceConfig *types.GitspaceConfig,
@@ -638,6 +663,10 @@ func (e EmbeddedDockerOrchestrator) StopGitspace(
 	}
 
 	if state == containerStateRemoved {
+		return fmt.Errorf("gitspace %s is removed", containerName)
+	}
+
+	if state == containerStateStopped {
 		log.Debug().Msg("gitspace is already stopped")
 		return nil
 	}
@@ -656,7 +685,7 @@ func (e EmbeddedDockerOrchestrator) StopGitspace(
 		}
 	}()
 
-	err = e.stopGitspace(ctx, containerName, dockerClient, logStreamInstance)
+	err = e.stopContainer(ctx, containerName, dockerClient, logStreamInstance)
 	if err != nil {
 		return fmt.Errorf("failed to stop gitspace %s: %w", containerName, err)
 	}
@@ -666,7 +695,7 @@ func (e EmbeddedDockerOrchestrator) StopGitspace(
 	return nil
 }
 
-func (e EmbeddedDockerOrchestrator) stopGitspace(
+func (e EmbeddedDockerOrchestrator) stopContainer(
 	ctx context.Context,
 	containerName string,
 	dockerClient *client.Client,
@@ -691,29 +720,6 @@ func (e EmbeddedDockerOrchestrator) stopGitspace(
 	}
 
 	loggingErr = logStreamInstance.Write("Successfully stopped container")
-	if loggingErr != nil {
-		return fmt.Errorf("logging error: %w", loggingErr)
-	}
-
-	loggingErr = logStreamInstance.Write("Removing container: " + containerName)
-	if loggingErr != nil {
-		return fmt.Errorf("logging error: %w", loggingErr)
-	}
-
-	err = dockerClient.ContainerRemove(ctx, containerName, dockerTypes.ContainerRemoveOptions{Force: true})
-	if err != nil {
-		loggingErr = logStreamInstance.Write("Error while removing container: " + err.Error())
-
-		err = fmt.Errorf("could not remove container %s: %w", containerName, err)
-
-		if loggingErr != nil {
-			err = fmt.Errorf("original error: %w; logging error: %w", err, loggingErr)
-		}
-
-		return err
-	}
-
-	loggingErr = logStreamInstance.Write("Successfully removed container")
 	if loggingErr != nil {
 		return fmt.Errorf("logging error: %w", loggingErr)
 	}
@@ -748,4 +754,105 @@ func (e *EmbeddedDockerOrchestrator) containerState(
 	}
 
 	return containers[0].State, nil
+}
+
+// StopAndRemoveGitspace stops the container if not stopped and removes it.
+// If the container is already removed, it returns.
+func (e *EmbeddedDockerOrchestrator) StopAndRemoveGitspace(
+	ctx context.Context,
+	gitspaceConfig *types.GitspaceConfig,
+	infra *infraprovider.Infrastructure,
+) error {
+	containerName := getGitspaceContainerName(gitspaceConfig)
+
+	log := log.Ctx(ctx).With().Str(loggingKey, containerName).Logger()
+
+	dockerClient, err := e.dockerClientFactory.NewDockerClient(ctx, infra)
+	if err != nil {
+		return fmt.Errorf("error getting docker client from docker client factory: %w", err)
+	}
+
+	defer func() {
+		closingErr := dockerClient.Close()
+		if closingErr != nil {
+			log.Warn().Err(closingErr).Msg("failed to close docker client")
+		}
+	}()
+
+	log.Debug().Msg("checking current state of gitspace")
+	state, err := e.containerState(ctx, containerName, dockerClient)
+	if err != nil {
+		return err
+	}
+
+	if state == containerStateRemoved {
+		log.Debug().Msg("gitspace is already removed")
+		return nil
+	}
+
+	logStreamInstance, loggerErr := e.statefulLogger.CreateLogStream(ctx, gitspaceConfig.ID)
+	if loggerErr != nil {
+		return fmt.Errorf("error getting log stream for gitspace ID %d: %w", gitspaceConfig.ID, loggerErr)
+	}
+
+	defer func() {
+		loggerErr = logStreamInstance.Flush()
+		if loggerErr != nil {
+			log.Warn().Err(loggerErr).Msgf("failed to flush log stream for gitspace ID %d", gitspaceConfig.ID)
+		}
+	}()
+
+	if state != containerStateStopped {
+		log.Debug().Msg("stopping gitspace")
+
+		err = e.stopContainer(ctx, containerName, dockerClient, logStreamInstance)
+		if err != nil {
+			return fmt.Errorf("failed to stop gitspace %s: %w", containerName, err)
+		}
+
+		log.Debug().Msg("stopped gitspace")
+	}
+
+	log.Debug().Msg("removing gitspace")
+
+	err = e.removeContainer(ctx, containerName, dockerClient, logStreamInstance)
+	if err != nil {
+		return fmt.Errorf("failed to remove gitspace %s: %w", containerName, err)
+	}
+
+	log.Debug().Msg("removed gitspace")
+
+	return nil
+}
+
+func (e EmbeddedDockerOrchestrator) removeContainer(
+	ctx context.Context,
+	containerName string,
+	dockerClient *client.Client,
+	logStreamInstance *logutil.LogStreamInstance,
+) error {
+	loggingErr := logStreamInstance.Write("Removing container: " + containerName)
+	if loggingErr != nil {
+		return fmt.Errorf("logging error: %w", loggingErr)
+	}
+
+	err := dockerClient.ContainerRemove(ctx, containerName, dockerTypes.ContainerRemoveOptions{Force: true})
+	if err != nil {
+		loggingErr = logStreamInstance.Write("Error while removing container: " + err.Error())
+
+		err = fmt.Errorf("could not remove container %s: %w", containerName, err)
+
+		if loggingErr != nil {
+			err = fmt.Errorf("original error: %w; logging error: %w", err, loggingErr)
+		}
+
+		return err
+	}
+
+	loggingErr = logStreamInstance.Write("Successfully removed container")
+	if loggingErr != nil {
+		return fmt.Errorf("logging error: %w", loggingErr)
+	}
+
+	return nil
 }

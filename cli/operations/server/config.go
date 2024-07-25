@@ -405,28 +405,10 @@ func ProvideIDEVSCodeWebConfig(config *types.Config) *container.VSCodeWebConfig 
 }
 
 // ProvideGitspaceContainerOrchestratorConfig loads the Gitspace container orchestrator config from the main config.
-func ProvideGitspaceContainerOrchestratorConfig(config *types.Config) (*container.Config, error) {
-	if config.Gitspace.DefaultBindMountSourceBasePath == "" {
-		var homedir string
-
-		homedir, err := os.UserHomeDir()
-		if err != nil {
-			return nil, fmt.Errorf("unable to determine home directory: %w", err)
-		}
-
-		config.Gitspace.DefaultBindMountSourceBasePath = filepath.Join(homedir, gitnessHomeDir)
-	}
-
-	if config.Gitspace.DefaultBindMountSourceBasePathAbsolute == "" {
-		config.Gitspace.DefaultBindMountSourceBasePathAbsolute = config.Gitspace.DefaultBindMountSourceBasePath
-	}
-
+func ProvideGitspaceContainerOrchestratorConfig(config *types.Config) *container.Config {
 	return &container.Config{
-		DefaultBaseImage:                       config.Gitspace.DefaultBaseImage,
-		DefaultBindMountTargetPath:             config.Gitspace.DefaultBindMountTargetPath,
-		DefaultBindMountSourceBasePath:         config.Gitspace.DefaultBindMountSourceBasePath,
-		DefaultBindMountSourceBasePathAbsolute: config.Gitspace.DefaultBindMountSourceBasePathAbsolute,
-	}, nil
+		DefaultBaseImage: config.Gitspace.DefaultBaseImage,
+	}
 }
 
 // ProvideGitspaceEventConfig loads the gitspace event service config from the main config.

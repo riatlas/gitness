@@ -191,6 +191,12 @@ export interface StringsMap {
   'cde.gitspaceDetail': string
   'cde.gitspaceUpdateSuccess': string
   'cde.gitspaces': string
+  'cde.homePage.getStartedNow': string
+  'cde.homePage.learnMoreAboutGitspaces': string
+  'cde.homePage.noSetupRequired': string
+  'cde.homePage.noteOne': string
+  'cde.homePage.noteTwo': string
+  'cde.homePage.start': string
   'cde.hours': string
   'cde.ide.browser': string
   'cde.ide.desktop': string
@@ -1165,6 +1171,7 @@ export interface StringsMap {
   webhookPRCreated: string
   webhookPRMerged: string
   webhookPRReopened: string
+  webhookPRUpdated: string
   webhookSelectAllEvents: string
   webhookSelectIndividualEvents: string
   webhookSelectPushEvents: string

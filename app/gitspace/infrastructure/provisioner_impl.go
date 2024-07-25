@@ -80,7 +80,7 @@ func (i infraProvisioner) Provision(
 		return nil, fmt.Errorf("invalid provisioning params %v: %w", infraProviderResource.Metadata, err)
 	}
 
-	provisionedInfra, err := infraProvider.Provision(ctx, gitspaceConfig.Identifier, allParams)
+	provisionedInfra, err := infraProvider.Provision(ctx, gitspaceConfig.SpacePath, gitspaceConfig.Identifier, allParams)
 	if err != nil {
 		return nil, fmt.Errorf(
 			"unable to provision infrastructure for gitspaceConfigIdentifier %v: %w",
@@ -93,7 +93,7 @@ func (i infraProvisioner) Provision(
 		// TODO: Update the infraProvisioned record
 	}
 
-	return &provisionedInfra, nil
+	return provisionedInfra, nil
 }
 
 func (i infraProvisioner) Stop(
@@ -133,11 +133,11 @@ func (i infraProvisioner) Stop(
 		return nil, fmt.Errorf("invalid provisioning params %+v: %w", infraProviderResource.Metadata, err)
 	}
 
-	var provisionedInfra infraprovider.Infrastructure
+	var provisionedInfra *infraprovider.Infrastructure
 	if infraProvider.ProvisioningType() == enum.InfraProvisioningTypeNew { //nolint:revive
 		// TODO: Fetch and check existing infraProvisioned record
 	} else {
-		provisionedInfra = infraprovider.Infrastructure{
+		provisionedInfra = &infraprovider.Infrastructure{
 			ResourceKey:  gitspaceConfig.Identifier,
 			ProviderType: infraProviderEntity.Type,
 			Parameters:   allParams,
@@ -153,10 +153,10 @@ func (i infraProvisioner) Stop(
 		// TODO: Update existing infraProvisioned record
 	}
 
-	return &stoppedInfra, err
+	return stoppedInfra, err
 }
 
-func (i infraProvisioner) Unprovision(
+func (i infraProvisioner) Deprovision(
 	ctx context.Context,
 	infraProviderResource *types.InfraProviderResource,
 	gitspaceConfig *types.GitspaceConfig,
@@ -193,18 +193,17 @@ func (i infraProvisioner) Unprovision(
 		return nil, fmt.Errorf("invalid provisioning params %+v: %w", infraProviderResource.Metadata, err)
 	}
 
-	var provisionedInfra infraprovider.Infrastructure
+	var provisionedInfra *infraprovider.Infrastructure
 	if infraProvider.ProvisioningType() == enum.InfraProvisioningTypeNew { //nolint:revive
 		// TODO: Fetch and check existing infraProvisioned record
 	} else {
-		provisionedInfra = infraprovider.Infrastructure{
-			ResourceKey:  gitspaceConfig.Identifier,
-			ProviderType: infraProviderEntity.Type,
-			Parameters:   allParams,
+		provisionedInfra, err = infraProvider.Find(ctx, gitspaceConfig.SpacePath, gitspaceConfig.Identifier, allParams)
+		if err != nil {
+			return nil, fmt.Errorf("unable to find provisioned infra for gitspace %s: %w",
+				gitspaceConfig.Identifier, err)
 		}
 	}
-
-	destroyedInfra, err := infraProvider.Destroy(ctx, provisionedInfra)
+	destroyedInfra, err := infraProvider.Deprovision(ctx, provisionedInfra)
 	if err != nil {
 		return nil, fmt.Errorf("unable to stop provisioned infra %+v: %w", provisionedInfra, err)
 	}
@@ -213,7 +212,7 @@ func (i infraProvisioner) Unprovision(
 		// TODO: Update existing infraProvisioned record
 	}
 
-	return &destroyedInfra, err
+	return destroyedInfra, err
 }
 
 func (i infraProvisioner) Find(
